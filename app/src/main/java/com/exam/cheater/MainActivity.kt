@@ -8,6 +8,7 @@ import android.net.Uri
 import android.os.Build
 import android.os.Bundle
 import android.provider.Settings
+import android.util.Log
 import android.widget.Toast
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
@@ -20,6 +21,7 @@ import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material3.Button
 import androidx.compose.material3.MaterialTheme
@@ -34,7 +36,6 @@ import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.LocalContext
-import androidx.compose.ui.text.input.KeyboardOptions
 import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.unit.dp
 import androidx.core.content.ContextCompat
@@ -52,15 +53,21 @@ class MainActivity : ComponentActivity() {
         captureLauncher = registerForActivityResult(ActivityResultContracts.StartActivityForResult()) { result ->
             val data = result.data
             if (result.resultCode == RESULT_OK && data != null) {
+                CaptureOverlayService.cacheProjectionPermission(result.resultCode, data)
                 val startIntent = Intent(this, CaptureOverlayService::class.java).apply {
                     action = CaptureOverlayService.ACTION_START
                     putExtra(CaptureOverlayService.EXTRA_RESULT_CODE, result.resultCode)
                     putExtra(CaptureOverlayService.EXTRA_RESULT_DATA, data)
                 }
-                ContextCompat.startForegroundService(this, startIntent)
-                toast("服务已启动")
+                try {
+                    ContextCompat.startForegroundService(this, startIntent)
+                    toast("Service started")
+                } catch (e: Exception) {
+                    Log.e(TAG, "Failed to start capture service", e)
+                    toast("Failed to start: ${e.javaClass.simpleName}")
+                }
             } else {
-                toast("未授予录屏权限")
+                toast("Screen-capture permission denied")
             }
         }
 
@@ -95,7 +102,7 @@ class MainActivity : ComponentActivity() {
 
     private fun openOverlayPermissionPage() {
         if (Settings.canDrawOverlays(this)) {
-            toast("已拥有悬浮窗权限")
+            toast("Overlay permission already granted")
             return
         }
         val intent = Intent(
@@ -113,20 +120,30 @@ class MainActivity : ComponentActivity() {
             }
             startService(refreshIntent)
         }
-        toast("配置已保存")
+        toast("Settings saved")
     }
 
     private fun startCapture(settings: AppSettings) {
         SettingsStore.save(this, settings)
 
         if (!Settings.canDrawOverlays(this)) {
-            toast("请先授予悬浮窗权限")
+            toast("Please grant overlay permission first")
             openOverlayPermissionPage()
             return
         }
 
-        val manager = getSystemService(MEDIA_PROJECTION_SERVICE) as MediaProjectionManager
-        captureLauncher.launch(manager.createScreenCaptureIntent())
+        val manager = getSystemService(MEDIA_PROJECTION_SERVICE) as? MediaProjectionManager
+        if (manager == null) {
+            toast("MediaProjection unavailable")
+            return
+        }
+
+        try {
+            captureLauncher.launch(manager.createScreenCaptureIntent())
+        } catch (e: Exception) {
+            Log.e(TAG, "Failed to launch screen-capture permission", e)
+            toast("Screen-capture request failed")
+        }
     }
 
     private fun stopCaptureService() {
@@ -134,11 +151,15 @@ class MainActivity : ComponentActivity() {
             action = CaptureOverlayService.ACTION_STOP
         }
         startService(stopIntent)
-        toast("服务已停止")
+        toast("Service stopped")
     }
 
     private fun toast(text: String) {
         Toast.makeText(this, text, Toast.LENGTH_SHORT).show()
+    }
+
+    companion object {
+        private const val TAG = "MainActivity"
     }
 }
 
@@ -198,56 +219,56 @@ private fun ConsoleScreen(
             .padding(16.dp),
         verticalArrangement = Arrangement.spacedBy(10.dp)
     ) {
-        Text("控制台", style = MaterialTheme.typography.headlineSmall)
-        Text("先保存配置，再点击“授权录屏并启动”。")
+        Text("Control Panel", style = MaterialTheme.typography.headlineSmall)
+        Text("Save settings first, then tap \"Grant Screen Capture & Start\".")
 
         Button(onClick = onRequestOverlayPermission, modifier = Modifier.fillMaxWidth()) {
-            Text("申请悬浮窗权限")
+            Text("Request Overlay Permission")
         }
 
         Row(horizontalArrangement = Arrangement.spacedBy(8.dp), modifier = Modifier.fillMaxWidth()) {
             Button(
                 onClick = { onSaveSettings(buildSettings()) },
                 modifier = Modifier.weight(1f)
-            ) { Text("保存配置") }
+            ) { Text("Save Settings") }
             Button(
                 onClick = { onStartCapture(buildSettings()) },
                 modifier = Modifier.weight(1f)
-            ) { Text("授权录屏并启动") }
+            ) { Text("Grant Screen Capture & Start") }
         }
 
         Button(onClick = onStopCapture, modifier = Modifier.fillMaxWidth()) {
-            Text("停止服务")
+            Text("Stop Service")
         }
 
-        Text("模型参数", style = MaterialTheme.typography.titleMedium)
+        Text("Model Settings", style = MaterialTheme.typography.titleMedium)
         LabeledTextField("API Key", apiKey, { apiKey = it })
         LabeledTextField("Base URL", baseUrl, { baseUrl = it })
         LabeledTextField("Model", model, { model = it })
-        LabeledTextField("截图间隔秒数(1-120)", intervalSeconds, { intervalSeconds = it }, numeric = true)
+        LabeledTextField("Capture Interval Seconds (1-120)", intervalSeconds, { intervalSeconds = it }, numeric = true)
 
-        Text("显示区域", style = MaterialTheme.typography.titleMedium)
-        LabeledTextField("区域 X", overlayX, { overlayX = it }, numeric = true)
-        LabeledTextField("区域 Y", overlayY, { overlayY = it }, numeric = true)
-        LabeledTextField("区域宽度", overlayWidth, { overlayWidth = it }, numeric = true)
-        LabeledTextField("区域高度", overlayHeight, { overlayHeight = it }, numeric = true)
+        Text("Overlay Area", style = MaterialTheme.typography.titleMedium)
+        LabeledTextField("Area X", overlayX, { overlayX = it }, numeric = true)
+        LabeledTextField("Area Y", overlayY, { overlayY = it }, numeric = true)
+        LabeledTextField("Area Width", overlayWidth, { overlayWidth = it }, numeric = true)
+        LabeledTextField("Area Height", overlayHeight, { overlayHeight = it }, numeric = true)
 
-        Text("字体样式", style = MaterialTheme.typography.titleMedium)
-        LabeledTextField("字体大小 SP", fontSize, { fontSize = it }, decimal = true)
-        LabeledTextField("字体颜色 HEX(如 #00FF00)", textColorHex, { textColorHex = it })
-        LabeledTextField("字体透明度(0-1)", textAlpha, { textAlpha = it }, decimal = true)
+        Text("Text Style", style = MaterialTheme.typography.titleMedium)
+        LabeledTextField("Font Size (SP)", fontSize, { fontSize = it }, decimal = true)
+        LabeledTextField("Text Color HEX (e.g. #00FF00)", textColorHex, { textColorHex = it })
+        LabeledTextField("Text Alpha (0-1)", textAlpha, { textAlpha = it }, decimal = true)
 
-        Text("边界框", style = MaterialTheme.typography.titleMedium)
+        Text("Border", style = MaterialTheme.typography.titleMedium)
         Row(
             modifier = Modifier.fillMaxWidth(),
             horizontalArrangement = Arrangement.SpaceBetween
         ) {
-            Text("启用边界框")
+            Text("Enable Border")
             Switch(checked = borderEnabled, onCheckedChange = { borderEnabled = it })
         }
-        LabeledTextField("边界框颜色 HEX", borderColorHex, { borderColorHex = it })
-        LabeledTextField("边框粗细 DP", borderWidthDp, { borderWidthDp = it }, decimal = true)
-        LabeledTextField("边框透明度(0-1)", borderAlpha, { borderAlpha = it }, decimal = true)
+        LabeledTextField("Border Color HEX", borderColorHex, { borderColorHex = it })
+        LabeledTextField("Border Width DP", borderWidthDp, { borderWidthDp = it }, decimal = true)
+        LabeledTextField("Border Alpha (0-1)", borderAlpha, { borderAlpha = it }, decimal = true)
     }
 }
 

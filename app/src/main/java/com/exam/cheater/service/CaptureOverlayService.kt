@@ -18,8 +18,8 @@ import android.media.projection.MediaProjectionManager
 import android.os.Build
 import android.os.IBinder
 import android.provider.Settings
+import android.util.Log
 import android.view.Gravity
-import android.view.WindowInsets
 import android.view.WindowManager
 import android.widget.FrameLayout
 import android.widget.TextView
@@ -46,6 +46,7 @@ class CaptureOverlayService : Service() {
     private var settings: AppSettings = AppSettings()
 
     private var mediaProjection: MediaProjection? = null
+    private var mediaProjectionCallback: MediaProjection.Callback? = null
     private var imageReader: ImageReader? = null
     private var virtualDisplay: VirtualDisplay? = null
 
@@ -56,7 +57,8 @@ class CaptureOverlayService : Service() {
     private var overlayTextView: TextView? = null
     private var overlayLayoutParams: WindowManager.LayoutParams? = null
 
-    private var latestAnswer: String = "等待截图与识别..."
+    private var latestAnswer: String = "Waiting for capture and recognition..."
+    private var projectionStatusHint: String? = null
 
     override fun onCreate() {
         super.onCreate()
@@ -81,22 +83,48 @@ class CaptureOverlayService : Service() {
             }
 
             ACTION_START -> {
-                startAsForeground()
                 settings = SettingsStore.load(this)
                 ensureOverlay()
                 applyOverlaySettings()
+                projectionStatusHint = null
 
-                val resultCode = intent.getIntExtra(EXTRA_RESULT_CODE, Int.MIN_VALUE)
-                val data = intent.getParcelableExtraCompat<Intent>(EXTRA_RESULT_DATA)
+                if (!startAsForeground()) {
+                    stopSelf()
+                    return START_NOT_STICKY
+                }
+                val resultCodeFromIntent = intent.getIntExtra(EXTRA_RESULT_CODE, Int.MIN_VALUE)
+                val dataFromIntent = intent.getParcelableExtraCompat<Intent>(EXTRA_RESULT_DATA)
+                val resultCode = if (resultCodeFromIntent != Int.MIN_VALUE) {
+                    resultCodeFromIntent
+                } else {
+                    cachedResultCode
+                }
+                val data = dataFromIntent ?: cachedResultData
+                cachedResultCode = Int.MIN_VALUE
+                cachedResultData = null
+
                 if (resultCode != Int.MIN_VALUE && data != null) {
-                    initProjection(resultCode, data)
+                    val projectionReady = initProjection(resultCode, data)
+                    if (!projectionReady) {
+                        if (projectionStatusHint.isNullOrBlank()) {
+                            projectionStatusHint = "Screen capture init failed. Please grant permission again."
+                            updateOverlayText(projectionStatusHint!!)
+                        }
+                    }
+                } else {
+                    Log.e(TAG, "Missing projection permission data. resultCode=$resultCode dataNull=${data == null}")
+                    projectionStatusHint = "Missing screen-capture permission data. Tap grant again."
+                    updateOverlayText(projectionStatusHint!!)
                 }
                 startCaptureLoop()
                 return START_STICKY
             }
 
             else -> {
-                startAsForeground()
+                if (!startAsForeground()) {
+                    stopSelf()
+                    return START_NOT_STICKY
+                }
                 settings = SettingsStore.load(this)
                 ensureOverlay()
                 applyOverlaySettings()
@@ -126,7 +154,7 @@ class CaptureOverlayService : Service() {
                 applyOverlaySettings()
 
                 if (mediaProjection == null || imageReader == null) {
-                    updateOverlayText("请在控制台点击“授权录屏并启动”")
+                    updateOverlayText(projectionStatusHint ?: "Tap \"Grant Screen Capture & Start\" in the app first.")
                     delay(1000)
                     continue
                 }
@@ -138,9 +166,10 @@ class CaptureOverlayService : Service() {
                     }
                     screenshot.recycle()
                     latestAnswer = answer
+                    projectionStatusHint = null
                     updateOverlayText(answer)
                 } else {
-                    updateOverlayText("截图失败，等待下一次重试...")
+                    updateOverlayText("Capture failed, waiting for next retry...")
                 }
 
                 delay(settings.intervalSeconds.coerceIn(1, 120) * 1000L)
@@ -184,24 +213,34 @@ class CaptureOverlayService : Service() {
         }
     }
 
-    private fun initProjection(resultCode: Int, data: Intent) {
+    private fun initProjection(resultCode: Int, data: Intent): Boolean {
         releaseProjection()
         val manager = getSystemService(Context.MEDIA_PROJECTION_SERVICE) as MediaProjectionManager
         mediaProjection = try {
             manager.getMediaProjection(resultCode, data)
-        } catch (_: SecurityException) {
+        } catch (e: SecurityException) {
+            Log.e(TAG, "getMediaProjection failed", e)
+            projectionStatusHint = "System rejected screen-capture token. Please grant again."
+            null
+        } catch (e: Exception) {
+            Log.e(TAG, "Unexpected getMediaProjection error", e)
+            projectionStatusHint = "Failed to obtain MediaProjection: ${e.javaClass.simpleName}"
             null
         }
 
         if (mediaProjection == null) {
-            updateOverlayText("录屏授权失效，请重新授权")
-            return
+            if (projectionStatusHint.isNullOrBlank()) {
+                projectionStatusHint = "Screen-capture authorization invalid, please grant again."
+            }
+            updateOverlayText(projectionStatusHint!!)
+            return false
         }
 
-        setupVirtualDisplay()
+        registerProjectionCallback(mediaProjection!!)
+        return setupVirtualDisplay()
     }
 
-    private fun setupVirtualDisplay() {
+    private fun setupVirtualDisplay(): Boolean {
         virtualDisplay?.release()
         imageReader?.close()
 
@@ -209,30 +248,50 @@ class CaptureOverlayService : Service() {
         val densityDpi = resources.displayMetrics.densityDpi
 
         imageReader = ImageReader.newInstance(width, height, PixelFormat.RGBA_8888, 2)
-        virtualDisplay = mediaProjection?.createVirtualDisplay(
-            "exam_capture_virtual_display",
-            width,
-            height,
-            densityDpi,
-            DisplayManager.VIRTUAL_DISPLAY_FLAG_AUTO_MIRROR,
-            imageReader?.surface,
-            null,
+        virtualDisplay = try {
+            mediaProjection?.createVirtualDisplay(
+                "exam_capture_virtual_display",
+                width,
+                height,
+                densityDpi,
+                DisplayManager.VIRTUAL_DISPLAY_FLAG_AUTO_MIRROR,
+                imageReader?.surface,
+                null,
+                null
+            )
+        } catch (e: IllegalStateException) {
+            Log.e(TAG, "createVirtualDisplay illegal state", e)
+            projectionStatusHint = "Projection state invalid. Please grant capture again."
             null
-        )
+        } catch (e: SecurityException) {
+            Log.e(TAG, "createVirtualDisplay failed", e)
+            projectionStatusHint = "System denied virtual display creation. Please grant again."
+            null
+        } catch (e: Exception) {
+            Log.e(TAG, "Unexpected createVirtualDisplay error", e)
+            projectionStatusHint = "Virtual display error: ${e.javaClass.simpleName}"
+            null
+        }
 
         if (virtualDisplay == null) {
-            updateOverlayText("创建截图通道失败")
+            if (projectionStatusHint.isNullOrBlank()) {
+                projectionStatusHint = "Failed to create capture channel."
+            }
+            updateOverlayText(projectionStatusHint!!)
+            imageReader?.close()
+            imageReader = null
+            return false
         }
+        projectionStatusHint = null
+        return true
     }
 
     private fun getScreenSize(): Pair<Int, Int> {
         val wm = windowManager ?: return 1080 to 1920
         return if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
-            val bounds = wm.currentWindowMetrics.bounds
-            val insets = wm.currentWindowMetrics.windowInsets
-                .getInsetsIgnoringVisibility(WindowInsets.Type.systemBars())
-            val width = (bounds.width() - insets.left - insets.right).coerceAtLeast(1)
-            val height = (bounds.height() - insets.top - insets.bottom).coerceAtLeast(1)
+            val bounds = wm.maximumWindowMetrics.bounds
+            val width = bounds.width().coerceAtLeast(1)
+            val height = bounds.height().coerceAtLeast(1)
             width to height
         } else {
             @Suppress("DEPRECATION")
@@ -350,6 +409,16 @@ class CaptureOverlayService : Service() {
     }
 
     private fun releaseProjection() {
+        val projection = mediaProjection
+        val callback = mediaProjectionCallback
+        if (projection != null && callback != null) {
+            try {
+                projection.unregisterCallback(callback)
+            } catch (_: Exception) {
+            }
+        }
+        mediaProjectionCallback = null
+
         try {
             virtualDisplay?.release()
         } catch (_: Exception) {
@@ -363,10 +432,30 @@ class CaptureOverlayService : Service() {
         imageReader = null
 
         try {
-            mediaProjection?.stop()
+            projection?.stop()
         } catch (_: Exception) {
         }
         mediaProjection = null
+    }
+
+    private fun registerProjectionCallback(projection: MediaProjection) {
+        val callback = object : MediaProjection.Callback() {
+            override fun onStop() {
+                Log.w(TAG, "MediaProjection stopped by system/user")
+                projectionStatusHint = "Screen capture stopped by system. Tap grant to resume."
+                serviceScope.launch {
+                    updateOverlayText(projectionStatusHint!!)
+                }
+                releaseProjection()
+            }
+        }
+        try {
+            projection.registerCallback(callback, null)
+            mediaProjectionCallback = callback
+        } catch (e: Exception) {
+            Log.e(TAG, "registerCallback failed", e)
+            projectionStatusHint = "Failed to register projection callback."
+        }
     }
 
     private fun stopEverything() {
@@ -380,24 +469,40 @@ class CaptureOverlayService : Service() {
         stopSelf()
     }
 
-    private fun startAsForeground() {
+    private fun startAsForeground(): Boolean {
         val notification = NotificationCompat.Builder(this, CHANNEL_ID)
             .setSmallIcon(android.R.drawable.ic_menu_camera)
             .setContentTitle(getString(R.string.app_name))
-            .setContentText("正在后台截图并识别题目")
+            .setContentText("Capture service is running")
             .setOngoing(true)
             .build()
 
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
-            startForeground(
-                NOTIFICATION_ID,
-                notification,
-                android.content.pm.ServiceInfo.FOREGROUND_SERVICE_TYPE_MEDIA_PROJECTION
-            )
-        } else {
-            startForeground(NOTIFICATION_ID, notification)
+        return try {
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+                startForeground(
+                    NOTIFICATION_ID,
+                    notification,
+                    android.content.pm.ServiceInfo.FOREGROUND_SERVICE_TYPE_MEDIA_PROJECTION
+                )
+            } else {
+                startForeground(NOTIFICATION_ID, notification)
+            }
+            true
+        } catch (e: SecurityException) {
+            Log.e(TAG, "startForeground(mediaProjection) failed", e)
+            try {
+                startForeground(NOTIFICATION_ID, notification)
+                true
+            } catch (fallbackError: Exception) {
+                Log.e(TAG, "Fallback startForeground failed", fallbackError)
+                false
+            }
+        } catch (e: Exception) {
+            Log.e(TAG, "startForeground failed", e)
+            false
         }
     }
+
 
     private fun createNotificationChannel() {
         if (Build.VERSION.SDK_INT < Build.VERSION_CODES.O) return
@@ -436,5 +541,17 @@ class CaptureOverlayService : Service() {
 
         private const val CHANNEL_ID = "exam_capture_channel"
         private const val NOTIFICATION_ID = 2001
+        private const val TAG = "CaptureOverlaySvc"
+
+        @Volatile
+        private var cachedResultCode: Int = Int.MIN_VALUE
+
+        @Volatile
+        private var cachedResultData: Intent? = null
+
+        fun cacheProjectionPermission(resultCode: Int, data: Intent) {
+            cachedResultCode = resultCode
+            cachedResultData = data
+        }
     }
 }
