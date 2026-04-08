@@ -23,101 +23,188 @@ object VisionApiClient {
 
     fun requestAnswers(bitmap: Bitmap, settings: AppSettings): String {
         if (settings.apiKey.isBlank()) {
-            return "请先在控制台配置 API Key"
+            return "Please configure API Key first."
         }
 
         val base64 = bitmapToBase64(bitmap)
         val prompt = buildPrompt()
-
-        val bodyJson = JSONObject().apply {
-            put("model", settings.model)
-            put("temperature", 0.1)
-            put("messages", JSONArray().apply {
-                put(
-                    JSONObject().apply {
-                        put("role", "system")
-                        put("content", "你是选择题答题助手，只输出题号和答案。")
-                    }
-                )
-                put(
-                    JSONObject().apply {
-                        put("role", "user")
-                        put("content", JSONArray().apply {
-                            put(
-                                JSONObject().apply {
-                                    put("type", "text")
-                                    put("text", prompt)
-                                }
-                            )
-                            put(
-                                JSONObject().apply {
-                                    put("type", "image_url")
-                                    put("image_url", JSONObject().apply {
-                                        put("url", "data:image/jpeg;base64,$base64")
-                                    })
-                                }
-                            )
-                        })
-                    }
-                )
-            })
-        }
+        val requestUrl = resolveChatCompletionsUrl(settings.baseUrl)
+        val bodyJson = buildChatCompletionsBody(base64, prompt, settings.model)
 
         return try {
             val request = Request.Builder()
-                .url(settings.baseUrl)
+                .url(requestUrl)
                 .addHeader("Authorization", "Bearer ${settings.apiKey}")
                 .addHeader("Content-Type", "application/json")
                 .post(bodyJson.toString().toRequestBody(jsonMediaType))
                 .build()
 
             client.newCall(request).execute().use { response ->
-                if (!response.isSuccessful) {
-                    return "模型请求失败: HTTP ${response.code}"
-                }
                 val raw = response.body?.string().orEmpty()
+                if (!response.isSuccessful) {
+                    return formatHttpError(response.code, raw, requestUrl)
+                }
                 parseModelText(raw)
             }
         } catch (e: Exception) {
-            "模型请求异常: ${e.message ?: "unknown"}"
+            "Model request exception: ${e.message ?: "unknown"}"
+        }
+    }
+
+    private fun buildChatCompletionsBody(base64Image: String, prompt: String, model: String): JSONObject {
+        return JSONObject().apply {
+            put("model", model)
+            put("temperature", 0.1)
+            put(
+                "messages",
+                JSONArray().apply {
+                    put(
+                        JSONObject().apply {
+                            put("role", "system")
+                            put("content", "You answer multiple-choice questions from screenshots. Output only questionNo:Answer.")
+                        }
+                    )
+                    put(
+                        JSONObject().apply {
+                            put("role", "user")
+                            put(
+                                "content",
+                                JSONArray().apply {
+                                    put(
+                                        JSONObject().apply {
+                                            put("type", "text")
+                                            put("text", prompt)
+                                        }
+                                    )
+                                    put(
+                                        JSONObject().apply {
+                                            put("type", "image_url")
+                                            put(
+                                                "image_url",
+                                                JSONObject().apply {
+                                                    put("url", "data:image/jpeg;base64,$base64Image")
+                                                }
+                                            )
+                                        }
+                                    )
+                                }
+                            )
+                        }
+                    )
+                }
+            )
+        }
+    }
+
+    private fun resolveChatCompletionsUrl(rawBaseUrl: String): String {
+        val trimmed = rawBaseUrl.trim().trimEnd('/')
+        if (trimmed.isBlank()) {
+            return "https://ark.cn-beijing.volces.com/api/v3/chat/completions"
+        }
+        return when {
+            trimmed.endsWith("/chat/completions", ignoreCase = true) -> trimmed
+            trimmed.endsWith("/api/v3", ignoreCase = true) -> "$trimmed/chat/completions"
+            trimmed.endsWith("/responses", ignoreCase = true) -> trimmed.removeSuffix("/responses") + "/chat/completions"
+            else -> trimmed
+        }
+    }
+
+    private fun formatHttpError(code: Int, rawBody: String, requestUrl: String): String {
+        val serverMessage = extractErrorMessage(rawBody)
+        val prefix = "Model request failed: HTTP $code"
+        val detail = if (serverMessage.isNotBlank()) " - $serverMessage" else ""
+        val tip = when {
+            code == 400 && serverMessage.contains("image", ignoreCase = true) ->
+                "\nTip: current model may not support image input. Use a vision model."
+            code == 400 && serverMessage.contains("model", ignoreCase = true) ->
+                "\nTip: check model name and whether your account has access."
+            code == 404 ->
+                "\nTip: check Base URL. Current request URL: $requestUrl"
+            else -> ""
+        }
+        return (prefix + detail + tip).take(600)
+    }
+
+    private fun extractErrorMessage(rawJson: String): String {
+        if (rawJson.isBlank()) return ""
+        return try {
+            val root = JSONObject(rawJson)
+            val errorObj = root.optJSONObject("error")
+            when {
+                errorObj != null -> errorObj.optString("message").ifBlank { errorObj.toString() }
+                root.optString("message").isNotBlank() -> root.optString("message")
+                root.optString("error_msg").isNotBlank() -> root.optString("error_msg")
+                else -> rawJson.take(240)
+            }
+        } catch (_: Exception) {
+            rawJson.take(240)
         }
     }
 
     private fun buildPrompt(): String {
         return """
-现在我有一张截图，上面有很多道选择题。
-请仔细分析并直接给出答案，不要有任何解析文字。
-输出格式严格为“题号:答案”。
-如果有多道题，每道题一行，例如：
+Analyze the screenshot and output only answers in `questionNo:Answer` format, one per line.
+If question number/options are incomplete, skip that question.
+Example:
 3:A
 4:B
-对于没有题号的题目、题干或选项不完整的题目，直接忽略。
         """.trimIndent()
     }
 
     private fun parseModelText(rawJson: String): String {
         return try {
             val root = JSONObject(rawJson)
+
             val choices = root.optJSONArray("choices")
-            val message = choices?.optJSONObject(0)?.optJSONObject("message")
-            val contentNode = message?.opt("content")
-            val content = when (contentNode) {
-                is String -> contentNode
-                is JSONArray -> {
-                    val texts = mutableListOf<String>()
-                    for (i in 0 until contentNode.length()) {
-                        val item = contentNode.optJSONObject(i)
-                        val text = item?.optString("text").orEmpty()
-                        if (text.isNotBlank()) texts += text
-                    }
-                    texts.joinToString("\n")
-                }
-                else -> ""
-            }
-            sanitizeAnswer(content)
+            val choiceMessage = choices
+                ?.optJSONObject(0)
+                ?.optJSONObject("message")
+                ?.opt("content")
+            val chatText = extractContentText(choiceMessage)
+            if (chatText.isNotBlank()) return sanitizeAnswer(chatText)
+
+            val outputText = root.optString("output_text")
+            if (outputText.isNotBlank()) return sanitizeAnswer(outputText)
+
+            val outputArray = root.optJSONArray("output")
+            val responseText = extractResponsesOutputText(outputArray)
+            if (responseText.isNotBlank()) return sanitizeAnswer(responseText)
+
+            "Model response parsed but no text content found."
         } catch (_: Exception) {
-            "模型返回解析失败"
+            "Failed to parse model response."
         }
+    }
+
+    private fun extractContentText(contentNode: Any?): String {
+        return when (contentNode) {
+            is String -> contentNode
+            is JSONArray -> {
+                val texts = mutableListOf<String>()
+                for (i in 0 until contentNode.length()) {
+                    val item = contentNode.optJSONObject(i) ?: continue
+                    val text = item.optString("text")
+                    if (text.isNotBlank()) texts += text
+                }
+                texts.joinToString("\n")
+            }
+            else -> ""
+        }
+    }
+
+    private fun extractResponsesOutputText(outputArray: JSONArray?): String {
+        if (outputArray == null) return ""
+        val texts = mutableListOf<String>()
+        for (i in 0 until outputArray.length()) {
+            val item = outputArray.optJSONObject(i) ?: continue
+            val contentArray = item.optJSONArray("content") ?: continue
+            for (j in 0 until contentArray.length()) {
+                val content = contentArray.optJSONObject(j) ?: continue
+                val text = content.optString("text")
+                if (text.isNotBlank()) texts += text
+            }
+        }
+        return texts.joinToString("\n")
     }
 
     private fun sanitizeAnswer(raw: String): String {
@@ -126,9 +213,9 @@ object VisionApiClient {
             .replace("答案", "")
             .trim()
 
-        if (cleaned.isBlank()) return "暂无可识别完整题目"
+        if (cleaned.isBlank()) return "No complete question recognized."
 
-        val regex = Regex("""(?m)(\\d+)\\s*[:：]\\s*([A-Z]+)""", RegexOption.IGNORE_CASE)
+        val regex = Regex("""(?m)(\d+)\s*[:：]\s*([A-Za-z]+)""")
         val lines = regex.findAll(cleaned)
             .map { "${it.groupValues[1]}:${it.groupValues[2].uppercase()}" }
             .toList()
