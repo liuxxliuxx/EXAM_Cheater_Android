@@ -143,11 +143,12 @@ object VisionApiClient {
 
     private fun buildPrompt(): String {
         return """
-Analyze the screenshot and output only answers in `questionNo:Answer` format, one per line.
+Analyze the screenshot and note that there are two types of questions: true/false questions and multiple-choice questions. Output only answers in `questionNo:Answer` format, one per line.
 If question number/options are incomplete, skip that question.
 Example:
 3:A
 4:B
+5:√
         """.trimIndent()
     }
 

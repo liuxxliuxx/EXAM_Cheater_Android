@@ -219,51 +219,51 @@ private fun ConsoleScreen(
             .padding(16.dp),
         verticalArrangement = Arrangement.spacedBy(10.dp)
     ) {
-        Text("Control Panel", style = MaterialTheme.typography.headlineSmall)
-        Text("Save settings first, then tap \"Grant Screen Capture & Start\".")
+        Text("控制面板", style = MaterialTheme.typography.headlineSmall)
+        Text("请先保存设置，然后点击 \"启动屏幕捕获并开启服务\".")
 
         Button(onClick = onRequestOverlayPermission, modifier = Modifier.fillMaxWidth()) {
-            Text("Request Overlay Permission")
+            Text("获取悬浮窗权限")
         }
 
         Row(horizontalArrangement = Arrangement.spacedBy(8.dp), modifier = Modifier.fillMaxWidth()) {
             Button(
                 onClick = { onSaveSettings(buildSettings()) },
                 modifier = Modifier.weight(1f)
-            ) { Text("Save Settings") }
+            ) { Text("保存设置") }
             Button(
                 onClick = { onStartCapture(buildSettings()) },
                 modifier = Modifier.weight(1f)
-            ) { Text("Grant Screen Capture & Start") }
+            ) { Text("启动屏幕捕获并开启服务") }
         }
 
         Button(onClick = onStopCapture, modifier = Modifier.fillMaxWidth()) {
-            Text("Stop Service")
+            Text("停止服务")
         }
 
-        Text("Model Settings", style = MaterialTheme.typography.titleMedium)
+        Text("API设置", style = MaterialTheme.typography.titleMedium)
         LabeledTextField("API Key", apiKey, { apiKey = it })
         LabeledTextField("Base URL", baseUrl, { baseUrl = it })
         LabeledTextField("Model", model, { model = it })
         LabeledTextField("Capture Interval Seconds (1-120)", intervalSeconds, { intervalSeconds = it }, numeric = true)
 
-        Text("Overlay Area", style = MaterialTheme.typography.titleMedium)
+        Text("显示区域", style = MaterialTheme.typography.titleMedium)
         LabeledTextField("Area X", overlayX, { overlayX = it }, numeric = true)
         LabeledTextField("Area Y", overlayY, { overlayY = it }, numeric = true)
         LabeledTextField("Area Width", overlayWidth, { overlayWidth = it }, numeric = true)
         LabeledTextField("Area Height", overlayHeight, { overlayHeight = it }, numeric = true)
 
-        Text("Text Style", style = MaterialTheme.typography.titleMedium)
+        Text("字体样式", style = MaterialTheme.typography.titleMedium)
         LabeledTextField("Font Size (SP)", fontSize, { fontSize = it }, decimal = true)
         LabeledTextField("Text Color HEX (e.g. #00FF00)", textColorHex, { textColorHex = it })
         LabeledTextField("Text Alpha (0-1)", textAlpha, { textAlpha = it }, decimal = true)
 
-        Text("Border", style = MaterialTheme.typography.titleMedium)
+        Text("边界框", style = MaterialTheme.typography.titleMedium)
         Row(
             modifier = Modifier.fillMaxWidth(),
             horizontalArrangement = Arrangement.SpaceBetween
         ) {
-            Text("Enable Border")
+            Text("边界框开关")
             Switch(checked = borderEnabled, onCheckedChange = { borderEnabled = it })
         }
         LabeledTextField("Border Color HEX", borderColorHex, { borderColorHex = it })
