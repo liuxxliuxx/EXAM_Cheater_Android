@@ -44,7 +44,7 @@ class CaptureOverlayService : Service() {
     private val serviceScope = CoroutineScope(SupervisorJob() + Dispatchers.Main.immediate)
 
     private var settings: AppSettings = AppSettings()
-
+    private var lastCapturedBitmap: Bitmap? = null
     private var mediaProjection: MediaProjection? = null
     private var mediaProjectionCallback: MediaProjection.Callback? = null
     private var imageReader: ImageReader? = null
@@ -59,6 +59,41 @@ class CaptureOverlayService : Service() {
 
     private var latestAnswer: String = "Waiting for capture and recognition..."
     private var projectionStatusHint: String? = null
+
+    private fun getStatusBarHeight(context: Context): Int {
+        var result = 0
+        // 首选：使用传统的资源反射方法，这在 Service 中依然非常有效
+        val resourceId = context.resources.getIdentifier("status_bar_height", "dimen", "android")
+        if (resourceId > 0) {
+            result = context.resources.getDimensionPixelSize(resourceId)
+        }
+
+        // 如果获取不到，给一个稍微大一点的默认安全值（比如 120px）
+        return if (result > 0) result else 120
+    }
+
+    private fun cropSystemBars(original: Bitmap): Bitmap {
+        val statusBarHeight = getStatusBarHeight(this)
+
+        // 计算裁剪后实际需要保留的高度
+        val safeHeight = original.height - statusBarHeight
+
+        // 容错处理：确保计算出的高度是合法的（大于0）
+        if (safeHeight <= 0 || original.width <= 0) {
+            return original
+        }
+
+        // 参数：原图, 起始X, 起始Y(避开状态栏), 宽度, 截取高度
+        val croppedBitmap = Bitmap.createBitmap(
+            original,
+            0,
+            statusBarHeight,
+            original.width,
+            safeHeight
+        )
+
+        return croppedBitmap
+    }
 
     override fun onCreate() {
         super.onCreate()
@@ -140,6 +175,8 @@ class CaptureOverlayService : Service() {
         releaseProjection()
         removeOverlay()
         serviceScope.cancel()
+        lastCapturedBitmap?.recycle()
+        lastCapturedBitmap = null
         super.onDestroy()
     }
 
@@ -159,15 +196,46 @@ class CaptureOverlayService : Service() {
                     continue
                 }
 
-                val screenshot = captureBitmapWithRetry()
-                if (screenshot != null) {
-                    val answer = withContext(Dispatchers.IO) {
-                        VisionApiClient.requestAnswers(screenshot, settings)
+                val rawScreenshot = captureBitmapWithRetry()
+                if (rawScreenshot != null) {
+
+                    val screenshot = cropSystemBars(rawScreenshot)
+
+                    if (rawScreenshot !== screenshot) {
+                        rawScreenshot.recycle()
                     }
-                    screenshot.recycle()
-                    latestAnswer = answer
-                    projectionStatusHint = null
-                    updateOverlayText(answer)
+
+                    // 【新增判断】：如果和上一次截图一模一样，直接跳过 API 请求
+                    if (lastCapturedBitmap != null && screenshot.sameAs(lastCapturedBitmap)) {
+                        Log.d(TAG, "Screenshot is identical to the last one, skipping API request.")
+                        // 及时回收当前这帧无用的截图，防止内存泄漏
+                        screenshot.recycle() 
+                    } else {
+                        // 图像不同，发送网络请求
+                        val answer = withContext(Dispatchers.IO) {
+                            VisionApiClient.requestAnswers(screenshot, settings)
+                        }
+
+                        latestAnswer = answer
+                        projectionStatusHint = null
+                        updateOverlayText(answer)
+
+                        // 【新增逻辑】：检查请求是否出错
+                        // 如果请求异常（没拿到正确答案），则不缓存此截图，以便下次循环可以重试
+                        val isError = answer.contains("failed", true) || 
+                                      answer.contains("exception", true) || 
+                                      answer.contains("Please configure", true)
+
+                        if (isError) {
+                            lastCapturedBitmap?.recycle()
+                            lastCapturedBitmap = null
+                            screenshot.recycle()
+                        } else {
+                            // 成功返回，将新图保存为参照物，并释放旧图
+                            lastCapturedBitmap?.recycle()
+                            lastCapturedBitmap = screenshot
+                        }
+                    }
                 } else {
                     updateOverlayText("Capture failed, waiting for next retry...")
                 }
