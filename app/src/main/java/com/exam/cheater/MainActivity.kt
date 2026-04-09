@@ -42,6 +42,10 @@ import androidx.core.content.ContextCompat
 import com.exam.cheater.data.SettingsStore
 import com.exam.cheater.model.AppSettings
 import com.exam.cheater.service.CaptureOverlayService
+import androidx.compose.foundation.isSystemInDarkTheme
+import androidx.compose.material3.darkColorScheme
+import androidx.compose.material3.lightColorScheme
+import androidx.compose.material3.Surface
 
 class MainActivity : ComponentActivity() {
     private lateinit var captureLauncher: ActivityResultLauncher<Intent>
@@ -78,13 +82,31 @@ class MainActivity : ComponentActivity() {
         requestNotificationIfNeeded()
 
         setContent {
-            MaterialTheme {
-                ConsoleScreen(
-                    onRequestOverlayPermission = { openOverlayPermissionPage() },
-                    onSaveSettings = { settings -> saveSettings(settings) },
-                    onStartCapture = { settings -> startCapture(settings) },
-                    onStopCapture = { stopCaptureService() }
-                )
+            // 1. 获取当前系统是否为深色模式
+            val useDarkTheme = isSystemInDarkTheme()
+
+            // 2. 根据系统状态选择对应的配色方案
+            val colorScheme = if (useDarkTheme) {
+                darkColorScheme()
+            } else {
+                lightColorScheme()
+            }
+
+            // 3. 将配色方案应用到 MaterialTheme
+            MaterialTheme(colorScheme = colorScheme) {
+                // 4. 使用 Surface 铺满全屏并设置背景底色
+                // Surface 会根据背景色自动反转内部 Text 的默认字体颜色（深底白字，浅底黑字）
+                Surface(
+                    modifier = Modifier.fillMaxSize(),
+                    color = MaterialTheme.colorScheme.background
+                ) {
+                    ConsoleScreen(
+                        onRequestOverlayPermission = { openOverlayPermissionPage() },
+                        onSaveSettings = { settings -> saveSettings(settings) },
+                        onStartCapture = { settings -> startCapture(settings) },
+                        onStopCapture = { stopCaptureService() }
+                    )
+                }
             }
         }
     }
